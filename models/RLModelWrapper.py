@@ -1,6 +1,8 @@
 import os
+import glob
 from typing import Union, List, Iterable, Dict
 from collections import deque
+from enum import Enum 
 
 import numpy as np
 import random
@@ -19,6 +21,8 @@ class RLModelWrapperBase:
         self.learn_every = info.get("learn_every", 3)  # num experiences btwn updates to network
         self.sync_every = info.get("sync_every", 1e4)  # num experiences btwn network.sync calls
         self.save_every = info.get("save_every", 5e5)  # num experiences btwn saving model checkpoint
+
+        self.learning_rate = info.get("lr", 0.00025)
         # TODO: Implement Exploration vs Exploitation Strategies. Using \epsilon-greedy for the moment
         self.exploration_rate = info.get("exploration_rate", 1.0)
         self.exploration_rate_decay = info.get("exploration_rate_decay", 0.99999975)
@@ -28,7 +32,10 @@ class RLModelWrapperBase:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.net = model.float().to(device = self.device)
         
-        if self.save_dir is not None:
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        self.loss_fn = torch.nn.SmoothL1Loss()
+
+        if self.save_dir is not None and not os.path.exists(self.save_dir):
             self.save_dir.mkdir(parents=True)
 
     def save(self) -> None:
@@ -40,7 +47,8 @@ class RLModelWrapperBase:
         # TODO: Add optimizer state to checkpoint to enable pausing training, also epoch.
         torch.save(
             dict(
-                model=self.net.state_dict(),
+                net_state_dict=self.net.state_dict(),
+                optimizer_state_dict=self.optimizer.state_dict(),
                 exploration_rate=self.exploration_rate
                 ),
                 save_path,
@@ -56,10 +64,11 @@ class RLModelWrapperBase:
             path = max(checkpoint_paths, key = os.path.getctime)
         print("Loading checkpoint", path)
         checkpoint = torch.load(path)
-        self.net.load_state_dict(checkpoint['model']) # 'model_state_dict'
-    #         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    #         epoch = checkpoint['epoch']
-    #         loss = checkpoint['loss']
+        self.net.load_state_dict(checkpoint['net_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.exploration_rate = checkpoints["exploration_rate"]
+        #epoch = checkpoint['epoch']
+        #loss = checkpoint['loss']
 
 
     @extendable(returns_scope = False)
@@ -108,12 +117,22 @@ class RLModelWrapperBase:
 
 
 class RLModelWrapperReplay(RLModelWrapperBase):
+    class SampleStrategy(Enum):
+        Basic = "basic"
+        # RankPriority = "rankpriority" # Can implement but it might be slow 
+        ProportionalPriority = "priority"
+
     def __init__(self, model: nn.Module, info: dict):
         super().__init__(model, info)
         self.memory_capacity = info.get("memory_capacity", 15000) 
         self.batch_size = info.get("batch_size", 32)
         self.memory = deque(maxlen=self.memory_capacity)
-
+        self.sample_strategy = info.get("replay_sample_strategy", "basic")
+        self.sample_strategy = RLModelWrapperReplay.SampleStrategy(self.sample_strategy)
+        self.sample_dist = deque(maxlen=self.memory_capacity)
+        self.sample_norm = 0
+        self.sample_epsilon = info.get("replay_sample_epsilon", .001)
+ 
         if self.burnin < self.batch_size: 
             raise ValueError("Burn-in must be larger than batch_size")
         if self.memory_capacity < self.batch_size: 
@@ -141,21 +160,49 @@ class RLModelWrapperReplay(RLModelWrapperBase):
         reward = torch.tensor([reward], device=self.device)
         done = torch.tensor([done], device=self.device)
 
+        sample_weight = self.get_sample_weights(state.unsqueeze(0), next_state.unsqueeze(0), 
+                                                action, reward, done)[0].item()
+        self.sample_norm += sample_weight  
+        if len(self.memory) == self.memory_capacity: 
+            self.sample_norm -= self.sample_dist[0]
+        self.sample_dist.append(sample_weight)
+
         self.memory.append((state, next_state, action, reward, done,))
+
 
     def recall(self):
         """
         Retrieve a batch of experiences from memory
         """
-        batch = random.sample(self.memory, self.batch_size)
+        # TODO: self.sample_norm == 0
+        batch_inds = np.random.choice(len(self.memory), self.batch_size, p = np.array(self.sample_dist) / self.sample_norm)
+        batch = [self.memory[ind] for ind in batch_inds]
         state, next_state, action, reward, done = map(torch.stack, zip(*batch))
-        return state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
+        return batch_inds, state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
+
+    @extendable(returns_scope = False)
+    def get_sample_weights(self, state, next_state, action, reward, done) -> float:
+        # print("=========================")
+        # print(f"{state.shape}")
+        # print(f"{next_state.shape}")
+        # print(f"{action.shape}")
+        # print(f"{reward.shape}")
+        # print(f"{done.shape}")
+        if self.sample_strategy == RLModelWrapperReplay.SampleStrategy.Basic:
+            return torch.ones(state.shape[0])
+        
+    def update_sample_dist(self, batch_inds: Iterable[int], weights: Iterable[float]) -> None: 
+        for ind, weight in zip(batch_inds, weights):
+            self.sample_norm -= self.sample_dist[ind]
+            self.sample_dist[ind] = abs(weight.detach().cpu().item())
+            self.sample_norm += self.sample_dist[ind]
 
     @extendable(returns_scope = True)
     @extend_super(RLModelWrapperBase)
     def learn(self, scope: Union[Dict, None] = None): 
-        state, next_state, action, reward, done = self.recall() # Sample batch from replay 
+        batch, state, next_state, action, reward, done = self.recall() # Sample batch from replay 
         scope = dict(
+            batch_inds = batch, 
             state = state, 
             next_state = next_state, 
             action = action, 
@@ -168,14 +215,11 @@ class TDWrapper(RLModelWrapperReplay):
     def __init__(self, model: nn.Module, info: Dict):
         super().__init__(model, info)
         self.discount = info.get("discount", 0.9) # reward discount
-        self.learning_rate = info.get("lr", 0.00025)
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
-        self.loss_fn = torch.nn.SmoothL1Loss()
 
     def td_estimate(self, state, action):
         # Online Q estimate = Q_online(s,a)
         current_Q = self.net(state, model="online")[
-            np.arange(0, self.batch_size), action
+            np.arange(0, state.shape[0]), action
         ] 
         return current_Q
 
@@ -185,7 +229,7 @@ class TDWrapper(RLModelWrapperReplay):
         next_state_Q = self.net(next_state, model="online")
         best_action = torch.argmax(next_state_Q, axis=1)
         next_Q = self.net(next_state, model="target")[
-            np.arange(0, self.batch_size), best_action
+            np.arange(0, next_state.shape[0]), best_action
         ]
         return (reward + (1 - done.float()) * self.discount * next_Q).float()
 
@@ -197,7 +241,18 @@ class TDWrapper(RLModelWrapperReplay):
         return loss.item()
 
     @extend_super(RLModelWrapperReplay, propogate_scope = False)
+    def get_sample_weights(self, state, next_state, action, reward, done, scope: Union[Dict, None] = None):
+        if self.sample_strategy == RLModelWrapperReplay.SampleStrategy.ProportionalPriority: 
+            td_est = self.td_estimate(state, action)
+            td_tgt = self.td_target(reward, next_state, done)
+            sample_weights = abs(td_tgt - td_est) + self.sample_epsilon
+            return sample_weights
+        else: 
+            raise ValueError(f"SampleStrategy ({self.sample_strategy}) is not supported")
+
+    @extend_super(RLModelWrapperReplay, propogate_scope = False)
     def learn(self, scope: Union[Dict, None] = None):
+        batch_inds = scope["batch_inds"]
         state = scope["state"]
         action = scope["action"]
         next_state = scope["next_state"]
@@ -205,6 +260,13 @@ class TDWrapper(RLModelWrapperReplay):
         done = scope["done"]
         td_est = self.td_estimate(state, action)
         td_tgt = self.td_target(reward, next_state, done)
+
+        # td_errors = td_tgt - td_est
+        # self.update_sample_dist(batch_inds, td_errors)
+
+        sample_weights = self.get_sample_weights(state, next_state, action, reward, done)
+        self.update_sample_dist(batch_inds, sample_weights)
+        
         loss = self.update_parameters(td_est, td_tgt)
         return (td_est.mean().item(), loss)
 
