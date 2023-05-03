@@ -13,7 +13,9 @@ from Decorators.ClassDecorators import extend_super, extendable, ScopedRetValue
 
 class RLModelWrapperBase:
     CHECKPOINT_FILE_EXT = '.chkpt'
-    def __init__(self, model: nn.Module, info: Dict):
+    def __init__(self, model: nn.Module, info: Union[Dict, None] = None):
+        if info is None: 
+            info = {}
         self.state_dim = info.get("state_dim")
         self.action_dim = info.get("action_dim")
         self.save_dir = info.get("save_dir", None)
@@ -28,6 +30,7 @@ class RLModelWrapperBase:
         self.exploration_rate_decay = info.get("exploration_rate_decay", 0.99999975)
         self.exploration_rate_min = info.get("exploration_rate_min", 0.1)
         self.curr_step = 0
+        self.episodes = 0
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.net = model.float().to(device = self.device)
@@ -37,6 +40,11 @@ class RLModelWrapperBase:
 
         if self.save_dir is not None and not os.path.exists(self.save_dir):
             self.save_dir.mkdir(parents=True)
+
+        self.save_attributes = ["state_dim", "action_dim", "save_dir", "burnin", 
+                                "learn_every", "sync_every", "save_every", "learning_rate",
+                                "exploration_rate", "exploration_rate_decay", "exploration_rate_min", 
+                                "curr_step", "episodes"]
 
     def save(self) -> None:
         if self.save_dir is None: 
@@ -49,27 +57,36 @@ class RLModelWrapperBase:
             dict(
                 net_state_dict=self.net.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict(),
-                exploration_rate=self.exploration_rate
+                save_attributes={attr: getattr(self, attr) for attr in self.save_attributes}
                 ),
                 save_path,
         )
         print(f"Network saved to {save_path} at step {self.curr_step}")
 
-    def get_checkpoint(self, path: Union[str, None] = None):
-        if path is None: 
+    def get_checkpoint(self, checkpoint_name: Union[str, None] = None):
+        # TODO: Change to proper error 
+        checkpoint_dir = self.save_dir
+        if checkpoint_dir is None: 
             runs = glob.glob(f"checkpoints/*")
-            last_run = max(runs, key = os.path.getctime)
-            checkpoint_paths = glob.glob(f"{last_run}/*{RLModelWrapperBase.CHECKPOINT_FILE_EXT}")
-            print(checkpoint_paths)
+            if len(runs) == 0: 
+                raise RuntimeError("No runs found in checkpoints/*")
+            checkpoint_dir = max(runs, key = os.path.getctime)
+        if checkpoint_name is None: 
+            checkpoint_paths = glob.glob(f"{checkpoint_dir}/*{RLModelWrapperBase.CHECKPOINT_FILE_EXT}")
+            if len(checkpoint_paths) == 0: 
+                raise RuntimeError(f"No checkpoints found in {checkpoint_dir}")
             path = max(checkpoint_paths, key = os.path.getctime)
+
         print("Loading checkpoint", path)
         checkpoint = torch.load(path)
         self.net.load_state_dict(checkpoint['net_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.exploration_rate = checkpoints["exploration_rate"]
-        #epoch = checkpoint['epoch']
-        #loss = checkpoint['loss']
+        for attrname, attrval in checkpoint["save_attributes"].items(): 
+            setattr(self, attrname, attrval)
 
+
+    def end_episode(self): 
+        self.episodes += 1
 
     @extendable(returns_scope = False)
     def learn(self): 
@@ -122,9 +139,9 @@ class RLModelWrapperReplay(RLModelWrapperBase):
         # RankPriority = "rankpriority" # Can implement but it might be slow 
         ProportionalPriority = "priority"
 
-    def __init__(self, model: nn.Module, info: dict):
+    def __init__(self, model: nn.Module, info: Union[Dict, None] = None):
         super().__init__(model, info)
-        self.memory_capacity = info.get("memory_capacity", 15000) 
+        self.memory_capacity = info.get("memory_capacity", 15000) # 100,000
         self.batch_size = info.get("batch_size", 32)
         self.memory = deque(maxlen=self.memory_capacity)
         self.sample_strategy = info.get("replay_sample_strategy", "basic")
@@ -132,6 +149,10 @@ class RLModelWrapperReplay(RLModelWrapperBase):
         self.sample_dist = deque(maxlen=self.memory_capacity)
         self.sample_norm = 0
         self.sample_epsilon = info.get("replay_sample_epsilon", .001)
+
+        # Saving and loading will empty memory. We're not going to save that 
+        self.save_attributes += ["memory_capacity", "batch_size", "memory", 
+            "sample_strategy", "sample_dist", "sample_norm", "sample_epsilon"]
  
         if self.burnin < self.batch_size: 
             raise ValueError("Burn-in must be larger than batch_size")
@@ -212,9 +233,10 @@ class RLModelWrapperReplay(RLModelWrapperBase):
 
 
 class TDWrapper(RLModelWrapperReplay):
-    def __init__(self, model: nn.Module, info: Dict):
+    def __init__(self, model: nn.Module, info: Union[Dict, None] = None):
         super().__init__(model, info)
         self.discount = info.get("discount", 0.9) # reward discount
+        self.save_attributes += ["discount"]
 
     def td_estimate(self, state, action):
         # Online Q estimate = Q_online(s,a)
@@ -234,6 +256,7 @@ class TDWrapper(RLModelWrapperReplay):
         return (reward + (1 - done.float()) * self.discount * next_Q).float()
 
     def update_parameters(self, td_estimate, td_target):
+        # TODO: Move to RLModelWrapperBase
         loss = self.loss_fn(td_estimate, td_target)
         self.optimizer.zero_grad()
         loss.backward()
