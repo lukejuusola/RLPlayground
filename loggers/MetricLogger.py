@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 
 class MetricLogger:
     def __init__(self, save_dir):
+        self.rolling_avg_len = 100
+
         self.save_log = None if save_dir is None else save_dir / "log"
         if self.save_log is not None: 
             if not os.path.exists(self.save_log):
@@ -69,10 +71,10 @@ class MetricLogger:
         self.curr_ep_loss_length = 0
 
     def record(self, episode, epsilon, step):
-        mean_ep_reward = np.round(np.mean(self.ep_rewards[-100:]), 3)
-        mean_ep_length = np.round(np.mean(self.ep_lengths[-100:]), 3)
-        mean_ep_loss = np.round(np.mean(self.ep_avg_losses[-100:]), 3)
-        mean_ep_q = np.round(np.mean(self.ep_avg_qs[-100:]), 3)
+        mean_ep_reward = np.round(np.mean(self.ep_rewards[-self.rolling_avg_len:]), 3)
+        mean_ep_length = np.round(np.mean(self.ep_lengths[-self.rolling_avg_len:]), 3)
+        mean_ep_loss = np.round(np.mean(self.ep_avg_losses[-self.rolling_avg_len:]), 3)
+        mean_ep_q = np.round(np.mean(self.ep_avg_qs[-self.rolling_avg_len:]), 3)
         self.moving_avg_ep_rewards.append(mean_ep_reward)
         self.moving_avg_ep_lengths.append(mean_ep_length)
         self.moving_avg_ep_avg_losses.append(mean_ep_loss)
