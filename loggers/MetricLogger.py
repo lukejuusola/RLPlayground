@@ -5,8 +5,10 @@ import matplotlib.pyplot as plt
 
 
 class MetricLogger:
-    def __init__(self, save_dir):
-        self.rolling_avg_len = 100
+    def __init__(self, save_dir, rolling_avg_len: int, record_every: int, print_every: int):
+        self.rolling_avg_len = rolling_avg_len
+        self.record_every = record_every
+        self.print_every = print_every
 
         self.save_log = None if save_dir is None else save_dir / "log"
         if self.save_log is not None: 
@@ -48,7 +50,7 @@ class MetricLogger:
             self.curr_ep_q += q
             self.curr_ep_loss_length += 1
 
-    def log_episode(self):
+    def log_episode(self, model_stats):
         "Mark end of episode"
         self.ep_rewards.append(self.curr_ep_reward)
         self.ep_lengths.append(self.curr_ep_length)
@@ -61,7 +63,13 @@ class MetricLogger:
         self.ep_avg_losses.append(ep_avg_loss)
         self.ep_avg_qs.append(ep_avg_q)
 
+        if model_stats.episode % self.record_every == 0: 
+            self.record(model_stats = model_stats, 
+                do_print = model_stats.episode % self.print_every == 0)
+
         self.init_episode()
+
+
 
     def init_episode(self):
         self.curr_ep_reward = 0.0
@@ -70,7 +78,10 @@ class MetricLogger:
         self.curr_ep_q = 0.0
         self.curr_ep_loss_length = 0
 
-    def record(self, episode, epsilon, step):
+    def record(self, model_stats, do_print: bool):
+        episode = model_stats.episode
+        epsilon = model_stats.exploration_rate
+        step = model_stats.curr_step
         mean_ep_reward = np.round(np.mean(self.ep_rewards[-self.rolling_avg_len:]), 3)
         mean_ep_length = np.round(np.mean(self.ep_lengths[-self.rolling_avg_len:]), 3)
         mean_ep_loss = np.round(np.mean(self.ep_avg_losses[-self.rolling_avg_len:]), 3)
@@ -84,17 +95,18 @@ class MetricLogger:
         self.record_time = time.time()
         time_since_last_record = np.round(self.record_time - last_record_time, 3)
 
-        print(
-            f"Episode {episode} - "
-            f"Step {step} - "
-            f"Epsilon {epsilon} - "
-            f"Mean Reward {mean_ep_reward} - "
-            f"Mean Length {mean_ep_length} - "
-            f"Mean Loss {mean_ep_loss} - "
-            f"Mean Q Value {mean_ep_q} - "
-            f"Time Delta {time_since_last_record} - "
-            f"Time {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
-        )
+        if do_print is True: 
+            print(
+                f"Episode {episode} - "
+                f"Step {step} - "
+                f"Epsilon {epsilon} - "
+                f"Mean Reward {mean_ep_reward} - "
+                f"Mean Length {mean_ep_length} - "
+                f"Mean Loss {mean_ep_loss} - "
+                f"Mean Q Value {mean_ep_q} - "
+                f"Time Delta {time_since_last_record} - "
+                f"Time {datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}"
+            )
 
         if self.save_log is not None: 
             with open(self.save_log, "a") as f:
@@ -107,5 +119,6 @@ class MetricLogger:
 
             for metric in ["ep_rewards", "ep_lengths", "ep_avg_losses", "ep_avg_qs"]:
                 plt.plot(getattr(self, f"moving_avg_{metric}"))
+                plt.title(metric)
                 plt.savefig(getattr(self, f"{metric}_plot"))
                 plt.clf()

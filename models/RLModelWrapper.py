@@ -5,13 +5,21 @@ from collections import deque
 from enum import Enum 
 
 import numpy as np
-import random
 import torch
 import torch.nn as nn
 
 from Decorators.ClassDecorators import extend_super, extendable, ScopedRetValue
+from dataclasses import dataclass
+
+@dataclass 
+class ModelStats: 
+    episode: int 
+    exploration_rate: float
+    curr_step: int
+
 
 class RLModelWrapperBase:
+
     CHECKPOINT_FILE_EXT = '.chkpt'
     def __init__(self, model: nn.Module, info: Union[Dict, None] = None):
         if info is None: 
@@ -24,7 +32,7 @@ class RLModelWrapperBase:
         self.sync_every = info.get("sync_every", 1e4)  # num experiences btwn network.sync calls
         self.save_every = info.get("save_every", 5e5)  # num experiences btwn saving model checkpoint
 
-        self.learning_rate = info.get("lr", 0.00025)
+        self.learning_rate = info.get("learning_rate", 0.00025)
         # TODO: Implement Exploration vs Exploitation Strategies. Using \epsilon-greedy for the moment
         self.exploration_rate = info.get("exploration_rate", 1.0)
         self.exploration_rate_decay = info.get("exploration_rate_decay", 0.99999975)
@@ -35,7 +43,9 @@ class RLModelWrapperBase:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.net = model.float().to(device = self.device)
         
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        #self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        self.optimizer = torch.optim.AdamW(self.net.parameters(), lr=self.learning_rate, amsgrad=True)
+
         self.loss_fn = torch.nn.SmoothL1Loss()
 
         if self.save_dir is not None and not os.path.exists(self.save_dir):
@@ -46,18 +56,20 @@ class RLModelWrapperBase:
                                 "exploration_rate", "exploration_rate_decay", "exploration_rate_min", 
                                 "curr_step", "episodes"]
 
+    def save_attr_dict(self):
+        return {attr: getattr(self, attr) for attr in self.save_attributes}
+
     def save(self) -> None:
         if self.save_dir is None: 
             return  
         save_path = (
             self.save_dir / f"net_{int(self.curr_step // self.save_every)}{RLModelWrapperBase.CHECKPOINT_FILE_EXT}"
         )
-        # TODO: Add optimizer state to checkpoint to enable pausing training, also epoch.
         torch.save(
             dict(
                 net_state_dict=self.net.state_dict(),
                 optimizer_state_dict=self.optimizer.state_dict(),
-                save_attributes={attr: getattr(self, attr) for attr in self.save_attributes}
+                save_attributes=self.save_attr_dict()
                 ),
                 save_path,
         )
@@ -85,16 +97,17 @@ class RLModelWrapperBase:
             setattr(self, attrname, attrval)
 
 
-    def end_episode(self): 
+    def end_episode(self) -> ModelStats: 
+        stats = ModelStats(episode = self.episodes, 
+            exploration_rate = self.exploration_rate, 
+            curr_step = self.curr_step)
         self.episodes += 1
+        return stats 
 
     @extendable(returns_scope = False)
     def learn(self): 
         if self.curr_step % self.sync_every == 0:
             # Will raise AttibuteError if not syncable. 
-            # TODO: 
-            # Sync strategy -- there's also a soft sync. 
-            # target_parameter = tau * target_parameter + (1 - tau) * online_parameter
             self.net.sync()
 
         if self.curr_step % self.save_every == 0:
@@ -106,7 +119,7 @@ class RLModelWrapperBase:
         if self.curr_step % self.learn_every != 0:
             return None, None
 
-    def act(self, state):
+    def act(self, state, exploit_only: bool = False):
         """
         Given a state, choose an epsilon-greedy action and update value of step.
 
@@ -116,7 +129,7 @@ class RLModelWrapperBase:
         ``action_idx`` (``int``): An integer representing which action will perform
         """
         # Explore or Exploit 
-        if np.random.rand() < self.exploration_rate:
+        if np.random.rand() < self.exploration_rate and exploit_only is False:
             action_idx = np.random.randint(self.action_dim)
         else:
             state = state[0].__array__() if isinstance(state, tuple) else state.__array__()
@@ -182,7 +195,7 @@ class RLModelWrapperReplay(RLModelWrapperBase):
         done = torch.tensor([done], device=self.device)
 
         sample_weight = self.get_sample_weights(state.unsqueeze(0), next_state.unsqueeze(0), 
-                                                action, reward, done)[0].item()
+                                                action.unsqueeze(0), reward.unsqueeze(0), done.unsqueeze(0))[0].item()
         self.sample_norm += sample_weight  
         if len(self.memory) == self.memory_capacity: 
             self.sample_norm -= self.sample_dist[0]
@@ -199,7 +212,7 @@ class RLModelWrapperReplay(RLModelWrapperBase):
         batch_inds = np.random.choice(len(self.memory), self.batch_size, p = np.array(self.sample_dist) / self.sample_norm)
         batch = [self.memory[ind] for ind in batch_inds]
         state, next_state, action, reward, done = map(torch.stack, zip(*batch))
-        return batch_inds, state, next_state, action.squeeze(), reward.squeeze(), done.squeeze()
+        return batch_inds, state, next_state, action, reward, done
 
     @extendable(returns_scope = False)
     def get_sample_weights(self, state, next_state, action, reward, done) -> float:
@@ -240,26 +253,30 @@ class TDWrapper(RLModelWrapperReplay):
 
     def td_estimate(self, state, action):
         # Online Q estimate = Q_online(s,a)
-        current_Q = self.net(state, model="online")[
-            np.arange(0, state.shape[0]), action
-        ] 
-        return current_Q
+        current_Q = self.net(state, model = "online")
+        current_v = current_Q.gather(1, action)
+        return current_v
 
     @torch.no_grad()
     def td_target(self, reward, next_state, done):
-        # Bootstrapped Q estimate
-        next_state_Q = self.net(next_state, model="online")
-        best_action = torch.argmax(next_state_Q, axis=1)
-        next_Q = self.net(next_state, model="target")[
-            np.arange(0, next_state.shape[0]), best_action
-        ]
-        return (reward + (1 - done.float()) * self.discount * next_Q).float()
+        assert len(reward.shape) == len(next_state.shape) == len(done.shape), f"{reward.shape=}, {next_state.shape=} {done.shape=}"
+        # TODO: Check Q and v follow literature 
+        online_next_Q = self.net(next_state, model = "online")
+        best_action = torch.argmax(online_next_Q, axis = 1).unsqueeze(1)
+        bootstrap_next_Q = self.net(next_state, model = "target")
+        bootstrap_next_v = bootstrap_next_Q.gather(1, best_action)
+        discounted_next_v = self.discount * (1 - done.float()) * bootstrap_next_v
+        return (reward + discounted_next_v).float()
 
     def update_parameters(self, td_estimate, td_target):
         # TODO: Move to RLModelWrapperBase
+        assert td_target.shape == td_estimate.shape, f"{td_target.shape=} != {td_estimate.shape=}"
         loss = self.loss_fn(td_estimate, td_target)
         self.optimizer.zero_grad()
         loss.backward()
+        # In-place gradient clipping
+        GRADIENT_CLIP = 100
+        torch.nn.utils.clip_grad_value_(self.net.parameters(), GRADIENT_CLIP)
         self.optimizer.step()
         return loss.item()
 
@@ -281,11 +298,8 @@ class TDWrapper(RLModelWrapperReplay):
         next_state = scope["next_state"]
         reward = scope["reward"]
         done = scope["done"]
-        td_est = self.td_estimate(state, action)
-        td_tgt = self.td_target(reward, next_state, done)
-
-        # td_errors = td_tgt - td_est
-        # self.update_sample_dist(batch_inds, td_errors)
+        td_est = self.td_estimate(state = state, action = action)
+        td_tgt = self.td_target(reward = reward, next_state = next_state, done = done)
 
         sample_weights = self.get_sample_weights(state, next_state, action, reward, done)
         self.update_sample_dist(batch_inds, sample_weights)
