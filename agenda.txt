@@ -1,0 +1,23 @@
+TODO: 
+Reproduce working results. I.e., that DQN.ipynb
+-- Something is amiss. My module's q values explode. Those do not. They look the same to me though. 
+
+Perfect reproducibility
+-- This will be useful for debugging 
+-- Current issue with module should be a more substantial bug than the reproducibility issue. 
+.yaml config file for defaults
+set up ide for easier debugging (want a visual / interactive debugger)
+Add more space to ubuntu partition
+PandasLogger
+
+Once reproduced, try Super Mario again
+Implement all of Rainbow
+-- Double Q
+-- Priority PER
+-- Multistep
+-- Distributional 
+-- Duelling Nets
+-- Noisy Nets
+Implement more RL models
+-- Q learning
+-- Actor Critic
