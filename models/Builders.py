@@ -1,10 +1,9 @@
 from typing import Dict, Union
 from .basic_models import AtariCNN, FullyConnected
-from .DDQN import DDQN
+from .DDQN import SyncStrategy, DDQN_SoftSync, DDQN_HardSync
 
 import torch 
 import torch.nn
-
 
 def build_atari_cnn(state_dim, action_dim):
 	return basic_models.AtariCNN(state_dim, action_dim)
@@ -19,5 +18,9 @@ def build_fc(in_dim: int, out_dim: int, info: Union[Dict, None] = None):
 
 def build_fc_dqnn(in_dim: int, out_dim: int, info: Union[Dict, None] = None): 
 	fc = build_fc(in_dim, out_dim, info)
-	return DDQN(fc)
+	sync_type = SyncStrategy(info["sync_strategy"])
+	if sync_type == SyncStrategy.Hard: 
+		return DDQN_HardSync(fc)
+	else: 
+		return DDQN_SoftSync(fc, info["sync_rate"])
 
