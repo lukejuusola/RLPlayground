@@ -259,7 +259,7 @@ class TDWrapper(RLModelWrapperReplay):
 
     @torch.no_grad()
     def td_target(self, reward, next_state, done):
-        assert len(reward.shape) == len(next_state.shape) == len(done.shape), f"{reward.shape=}, {next_state.shape=} {done.shape=}"
+        assert reward.shape[0] == next_state.shape[0] == done.shape[0], f"{reward.shape=}, {next_state.shape=} {done.shape=}"
         # TODO: Check Q and v follow literature 
         online_next_Q = self.net(next_state, model = "online")
         best_action = torch.argmax(online_next_Q, axis = 1).unsqueeze(1)

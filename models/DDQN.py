@@ -43,7 +43,7 @@ class DDQN_Base(nn.Module):
 
 # TODO: This could also be done as a mode in the base class. Might refactor later. Depends how deep the inheritance goes.  
 class DDQN_HardSync(DDQN_Base):
-	def sync(self, tau: Union[float, None]):  
+	def sync(self):  
 		self.target.load_state_dict(self.online.state_dict())
 
 class DDQN_SoftSync(DDQN_Base):
