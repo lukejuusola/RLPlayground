@@ -1,7 +1,4 @@
 TODO: 
-Reproduce working results. I.e., that DQN.ipynb
--- Something is amiss. My module's q values explode. Those do not. They look the same to me though. 
-
 Perfect reproducibility
 -- This will be useful for debugging 
 -- Current issue with module should be a more substantial bug than the reproducibility issue. 
@@ -9,6 +6,13 @@ Perfect reproducibility
 set up ide for easier debugging (want a visual / interactive debugger)
 Add more space to ubuntu partition
 PandasLogger
+Plotter util + aggregator. 
+PER done. Importance sampling addition to PER. 
+Replay Memory in CPU to be able to have larger buffer?
+For Pong:  
+-- terminate if point scored against you. Should increase reward density. 
+-- could also make episode length the reward. This would at least get it off the ground, I'd think. 
+Parameter decay schedulers. 
 
 Once reproduced, try Super Mario again
 Implement all of Rainbow
