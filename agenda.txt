@@ -1,4 +1,6 @@
 TODO: 
+Set up Github [05/08/2023]
+
 Perfect reproducibility
 -- This will be useful for debugging 
 -- Current issue with module should be a more substantial bug than the reproducibility issue. 
